@@ -221,6 +221,7 @@ COPY docker-php-ext-* docker-php-entrypoint /usr/local/bin/
 RUN docker-php-ext-enable sodium
 
 ENTRYPOINT ["docker-php-entrypoint"]
+
 WORKDIR /var/www/html
 
 RUN set -eux; \
