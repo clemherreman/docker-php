@@ -4,40 +4,36 @@
 # PLEASE DO NOT EDIT IT DIRECTLY.
 #
 
-FROM debian:bullseye-slim
-
-# prevent Debian's PHP packages from being installed
-# https://github.com/docker-library/php/pull/542
-RUN set -eux; \
-	{ \
-		echo 'Package: php*'; \
-		echo 'Pin: release *'; \
-		echo 'Pin-Priority: -1'; \
-	} > /etc/apt/preferences.d/no-debian-php
+FROM alpine:3.19
 
 # dependencies required for running "phpize"
-# (see persistent deps below)
+# these get automatically installed and removed by "docker-php-ext-*" (unless they're already installed)
 ENV PHPIZE_DEPS \
 		autoconf \
-		dpkg-dev \
+		dpkg-dev dpkg \
 		file \
 		g++ \
 		gcc \
 		libc-dev \
 		make \
-		pkg-config \
+		pkgconf \
 		re2c
 
 # persistent / runtime deps
-RUN set -eux; \
-	apt-get update; \
-	apt-get install -y --no-install-recommends \
-		$PHPIZE_DEPS \
+RUN apk add --no-cache \
 		ca-certificates \
 		curl \
-		xz-utils \
-	; \
-	rm -rf /var/lib/apt/lists/*
+		openssl \
+		tar \
+		xz
+
+# ensure www-data user exists
+RUN set -eux; \
+	adduser -u 82 -D -S -G www-data www-data
+# 82 is the standard uid/gid for "www-data" in Alpine
+# https://git.alpinelinux.org/aports/tree/main/apache2/apache2.pre-install?h=3.14-stable
+# https://git.alpinelinux.org/aports/tree/main/lighttpd/lighttpd.pre-install?h=3.14-stable
+# https://git.alpinelinux.org/aports/tree/main/nginx/nginx.pre-install?h=3.14-stable
 
 ENV PHP_INI_DIR /usr/local/etc/php
 RUN set -eux; \
@@ -58,18 +54,15 @@ ENV PHP_CFLAGS="-fstack-protector-strong -fpic -fpie -O2 -D_LARGEFILE_SOURCE -D_
 ENV PHP_CPPFLAGS="$PHP_CFLAGS"
 ENV PHP_LDFLAGS="-Wl,-O1 -pie"
 
-ENV GPG_KEYS 39B641343D8C104B2B146DC3F9C39DC0B9698544 E60913E4DF209907D8E30D96659A97C9CF2A795A 1198C0117593497A5EC5C199286AF1F9897469DC
+ENV GPG_KEYS 1198C0117593497A5EC5C199286AF1F9897469DC C28D937575603EB4ABB725861C0779DC5C0A9DE4 AFD8691FDAEDF03BDF6E460563F15A9B715376CA
 
-ENV PHP_VERSION 8.2.23
-ENV PHP_URL="https://www.php.net/distributions/php-8.2.23.tar.xz" PHP_ASC_URL="https://www.php.net/distributions/php-8.2.23.tar.xz.asc"
-ENV PHP_SHA256="81c5ae6ba44e262a076349ee54a2e468638a4571085d80bff37f6fd308e1d8d5"
+ENV PHP_VERSION 8.3.11
+ENV PHP_URL="https://www.php.net/distributions/php-8.3.11.tar.xz" PHP_ASC_URL="https://www.php.net/distributions/php-8.3.11.tar.xz.asc"
+ENV PHP_SHA256="b862b098a08ab9bf4b36ed12c7d0d9f65353656b36fb0e3c5344093aceb35802"
 
 RUN set -eux; \
 	\
-	savedAptMark="$(apt-mark showmanual)"; \
-	apt-get update; \
-	apt-get install -y --no-install-recommends gnupg; \
-	rm -rf /var/lib/apt/lists/*; \
+	apk add --no-cache --virtual .fetch-deps gnupg; \
 	\
 	mkdir -p /usr/src; \
 	cd /usr/src; \
@@ -91,27 +84,28 @@ RUN set -eux; \
 		rm -rf "$GNUPGHOME"; \
 	fi; \
 	\
-	apt-mark auto '.*' > /dev/null; \
-	apt-mark manual $savedAptMark > /dev/null; \
-	apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false
+	apk del --no-network .fetch-deps
 
 COPY docker-php-source /usr/local/bin/
 
 RUN set -eux; \
-	\
-	savedAptMark="$(apt-mark showmanual)"; \
-	apt-get update; \
-	apt-get install -y --no-install-recommends \
-		libargon2-dev \
-		libcurl4-openssl-dev \
-		libonig-dev \
-		libreadline-dev \
+	apk add --no-cache --virtual .build-deps \
+		$PHPIZE_DEPS \
+		argon2-dev \
+		coreutils \
+		curl-dev \
+		gnu-libiconv-dev \
 		libsodium-dev \
-		libsqlite3-dev \
-		libssl-dev \
 		libxml2-dev \
-		zlib1g-dev \
+		linux-headers \
+		oniguruma-dev \
+		openssl-dev \
+		readline-dev \
+		sqlite-dev \
 	; \
+	\
+# make sure musl's iconv doesn't get used (https://www.php.net/manual/en/intro.iconv.php)
+	rm -vf /usr/include/iconv.h; \
 	\
 	export \
 		CFLAGS="$PHP_CFLAGS" \
@@ -124,11 +118,6 @@ RUN set -eux; \
 	docker-php-source extract; \
 	cd /usr/src/php; \
 	gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)"; \
-	debMultiarch="$(dpkg-architecture --query DEB_BUILD_MULTIARCH)"; \
-# https://bugs.php.net/bug.php?id=74125
-	if [ ! -d /usr/include/curl ]; then \
-		ln -sT "/usr/include/$debMultiarch/curl" /usr/local/include/curl; \
-	fi; \
 	./configure \
 		--build="$gnuArch" \
 		--with-config-file-path="$PHP_INI_DIR" \
@@ -156,7 +145,7 @@ RUN set -eux; \
 		--with-sqlite3=/usr \
 		\
 		--with-curl \
-		--with-iconv \
+		--with-iconv=/usr \
 		--with-openssl \
 		--with-readline \
 		--with-zlib \
@@ -167,17 +156,14 @@ RUN set -eux; \
 # in PHP 7.4+, the pecl/pear installers are officially deprecated (requiring an explicit "--with-pear")
 		--with-pear \
 		\
-# bundled pcre does not support JIT on riscv64 until 10.41 (php 8.3+)
-# https://github.com/PCRE2Project/pcre2/commits/pcre2-10.41/src/sljit/sljitNativeRISCV_64.c
-# https://github.com/php/php-src/tree/php-8.3.0/ext/pcre/pcre2lib
-		$(test "$gnuArch" = 'riscv64-linux-gnu' && echo '--without-pcre-jit') \
-		--with-libdir="lib/$debMultiarch" \
-		\
-		--disable-cgi \
 		\
 		--enable-fpm \
 		--with-fpm-user=www-data \
 		--with-fpm-group=www-data \
+		\
+		--enable-zts \
+		# https://externals.io/message/118859
+		--disable-zend-signals \
 	; \
 	make -j "$(nproc)"; \
 	find -type f -name '*.a' -delete; \
@@ -198,19 +184,15 @@ RUN set -eux; \
 	cd /; \
 	docker-php-source delete; \
 	\
-# reset apt-mark's "manual" list so that "purge --auto-remove" will remove all build dependencies
-	apt-mark auto '.*' > /dev/null; \
-	[ -z "$savedAptMark" ] || apt-mark manual $savedAptMark; \
-	find /usr/local -type f -executable -exec ldd '{}' ';' \
-		| awk '/=>/ { so = $(NF-1); if (index(so, "/usr/local/") == 1) { next }; gsub("^/(usr/)?", "", so); printf "*%s\n", so }' \
-		| sort -u \
-		| xargs -r dpkg-query --search \
-		| cut -d: -f1 \
-		| sort -u \
-		| xargs -r apt-mark manual \
-	; \
-	apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
-	rm -rf /var/lib/apt/lists/*; \
+	runDeps="$( \
+		scanelf --needed --nobanner --format '%n#p' --recursive /usr/local \
+			| tr ',' '\n' \
+			| sort -u \
+			| awk 'system("[ -e /usr/local/lib/" $1 " ]") == 0 { next } { print "so:" $1 }' \
+	)"; \
+	apk add --no-cache $runDeps; \
+	\
+	apk del --no-network .build-deps; \
 	\
 # update pecl channel definitions https://github.com/docker-library/php/issues/443
 	pecl update-channels; \
